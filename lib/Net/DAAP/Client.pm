@@ -2,14 +2,14 @@ use strict;
 package Net::DAAP::Client;
 use Net::DAAP::Client::v2;
 use Net::DAAP::Client::v3;
-use Net::DAAP::DMAP 1.21;
+use Net::DAAP::DMAP 1.22;
 use Net::DAAP::DMAP qw(:all);
 use LWP;
 use HTTP::Request::Common;
 use Carp;
 use sigtrap qw(die untrapped normal-signals);
 use vars qw( $VERSION );
-$VERSION = '0.41';
+$VERSION = '0.42';
 
 =head1 NAME
 
@@ -77,7 +77,6 @@ my %Defaults = (
                             daap.songalbum daap.songartist daap.songformat
                             daap.songsize) ],
 
-
     # private
     ERROR         => "",
     CONNECTED     => 0,
@@ -87,6 +86,7 @@ my %Defaults = (
     PLAYLISTS     => undef,
     VALIDATOR     => undef,
    );
+
 
 sub new {
     my $class = shift;
@@ -152,7 +152,6 @@ sub _init {
 
 sub _debug {
     my $self = shift;
-
     warn "$_[0]\n" if $self->{DEBUG};
 }
 
@@ -172,8 +171,11 @@ returning C<undef>.
 
 sub connect {
     my $self = shift;
-    my $ua = ($self->{UA} ||= LWP::UserAgent->new(keep_alive => 1) );
-    my ($dmap, $id, $revision);
+    my $ua = ($self->{UA} ||= Net::DAAP::Client::UA->new(keep_alive => 1) );
+    my ($dmap, $id);
+
+    $self->_devine_validator;
+
 
     $self->error("");
     $self->{DATABASE_LIST} = undef;
@@ -188,14 +190,13 @@ sub connect {
     my %hash = dmap_flat_list( dmap_unpack ($dmap) );
     my $data_source_name = $hash{'/dmap.serverinforesponse/dmap.itemname'};
     $self->{DSN} = $data_source_name;
-    $self->_debug("Connected to iTunes data $data_source_name\n");
-    $self->_select_validator( %hash );
+    $self->_debug("Connected to iTunes share '$data_source_name'");
 
     # log in
     $dmap = $self->_do_get("login") or return;
     $id = dmap_seek(dmap_unpack($dmap), "dmap.loginresponse/dmap.sessionid");
     $self->{ID} = $id;
-    $self->_debug("my id is $id\n");
+    $self->_debug("my id is $id");
 
     $self->{CONNECTED} = 1;
 
@@ -279,14 +280,14 @@ sub db {
     $db = $self->{DATABASE_LIST}{$db_id};
     if (defined $db) {
         $self->{DATABASE} = $db_id;
-        $self->_debug("Loading songs from database $db->{'dmap.itemname'}\n");
+        $self->_debug("Loading songs from database $db->{'dmap.itemname'}");
         $self->{SONGS} = $self->_get_songs($db_id)
           or return;
-        $self->_debug("Loading playlists from database $db->{'dmap.itemname'}\n");
+        $self->_debug("Loading playlists from database $db->{'dmap.itemname'}");
         $self->{PLAYLISTS} = $self->_get_playlists($db_id)
           or return;
     } else {
-        $self->error("Database ID $db_id not found\n");
+        $self->error("Database ID $db_id not found");
         return;
     }
 
@@ -649,15 +650,17 @@ sub disconnect {
     my $self = shift;
 
     $self->error("");
-    (undef) = $self->_do_get("logout");
+    if ($self->{CONNECTED}) {
+        (undef) = $self->_do_get("logout");
+    }
     undef $self->{CONNECTED};
     return $self->error;
 }
 
 sub DESTROY {
     my $self = shift;
-    $self->_debug("Destroying $self->{ID} to $self->{SERVER_HOST}\n");
-    $self->disconnect if $self->{CONNECTED};
+    $self->_debug("Destroying $self->{ID} to $self->{SERVER_HOST}");
+    $self->disconnect;
 }
 
 =head2 * error()
@@ -671,22 +674,30 @@ Returns the most recent error code.  Empty string if no error occurred.
 sub error {
     my $self = shift;
     if ($self->{DEBUG} and defined($_[0]) and length($_[0])) {
-        warn "Setting error to $_[0]";
+        warn "Setting error to $_[0]\n";
     }
     if (@_) { $self->{ERROR} = shift } else { $self->{ERROR} }
 }
 
-
-sub _select_validator {
-    my ($self, %server_info) = @_;
+sub _devine_validator {
+    my $self = shift;
     $self->{VALIDATOR} = undef;
+    $self->{M4p_evil}  = 0;
 
-    $self->{VALIDATOR} = __PACKAGE__."::v3"
-      if $server_info{'/dmap.serverinforesponse/daap.protocolversion'} == 3;
+    my $response = $self->{UA}->get( $self->_server_url.'/server-info' );
+    my $server = $response->header('DAAP-Server');
 
-    $self->{VALIDATOR} = __PACKAGE__."::v2"
-      if $server_info{'/dmap.serverinforesponse/daap.protocolversion'} == 2;
+    if ($server =~ m{^iTunes/4.2 }) {
+        $self->{VALIDATOR} = __PACKAGE__."::v2";
+        return;
+    }
+
+    if ($server =~ m{^iTunes/}) {
+        $self->{M4p_evil} = 1;
+        $self->{VALIDATOR} = __PACKAGE__."::v3"
+    }
 }
+
 
 sub _validation_cookie {
     my $self = shift;
@@ -694,28 +705,34 @@ sub _validation_cookie {
     return ( "Client-DAAP-Validation" => $self->{VALIDATOR}->validate( @_ ) );
 }
 
+sub _server_url {
+    my $self = shift;
+    sprintf("http://%s:%d", $self->{SERVER_HOST}, $self->{SERVER_PORT});
+}
+
+# quite the fugly hack
+my @credentials;
+{
+    package Net::DAAP::Client::UA;
+    use base qw( LWP::UserAgent );
+    sub get_basic_credentials { return @credentials }
+
+}
+
 sub _do_get {
     my ($self, $req, $file) = @_;
-    my $server_url = sprintf("http://%s:%d",
-                             $self->{SERVER_HOST},
-                             $self->{SERVER_PORT});
-
     if (!defined wantarray) { carp "_do_get's result is being ignored" }
 
     my $id = $self->{ID};
     my $revision = $self->{REVISION};
     my $ua = $self->{UA};
 
-    my $url = "$server_url/$req";
+    my $url = $self->_server_url . "/$req";
     my $res;
 
     # append session-id and revision-number query args automatically
     if ($self->{ID}) {
-        if ($req =~ m{ \? }x) {
-            $url .= "&";
-        } else {
-            $url .= "?";
-        }
+        $url .= $req =~ m{ \? }x ? "&" : "?";
         $url .= "session-id=$id";
     }
 
@@ -741,15 +758,24 @@ sub _do_get {
        );
 
     #print ">>>>\n", $request->as_string, ">>>>>\n";
+
+    # It would seem that 4.{5,6} are using their internal MD5/M4p for
+    # their digest auth, or some other form of evil, certainly the
+    # regular Digest auth that works with 4.2 gets refused.
+
+    #local *Digest::MD5::new = sub { shift; Digest::MD5::M4p->new( @_ ) }
+    #  if $self->{M4p_evil};
+
+    @credentials = $self->{PASSWORD} ? ('iTunes_4.6', $self->{PASSWORD}) : ();
+
     if ($file) {
         $res = $ua->request($request, $file);
     } else {
         $res = $ua->request($request);
     }
-
     # complain if the server sent back the wrong response
     unless ($res->is_success) {
-        $self->error("$url\n".$res->as_string);
+        $self->error("$url\n" . $res->as_string);
         return;
     }
 
@@ -777,7 +803,7 @@ No authentication.  No updates.  No browsing.  No searching.
 =head1 AUTHOR
 
 Nathan Torkington, <nathan AT torkington.com>.  For support, join the
-DAAP developers mailing list by sending mail to <daap-devel-subscribe
+DAAP developers mailing list by sending mail to <daap-dev-subscribe
 AT develooper.com>.  See the AUTHORS file in the distribution for other
 contributors.
 

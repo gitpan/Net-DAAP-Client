@@ -8,7 +8,7 @@ WriteMakefile
                            'Digest::MD5' => '0',
                            'Digest::MD5::M4p' => '0',
                            'LWP' => '0',
-                           'Net::DAAP::DMAP' => '1.21',
+                           'Net::DAAP::DMAP' => '1.22',
                            'Test::More' => '0'
                          },
           'INSTALLDIRS' => 'site',
