@@ -9,7 +9,7 @@ use HTTP::Request::Common;
 use Carp;
 use sigtrap qw(die untrapped normal-signals);
 use vars qw( $VERSION );
-$VERSION = '0.4';
+$VERSION = '0.41';
 
 =head1 NAME
 
@@ -146,7 +146,7 @@ sub _init {
     my %opts = @_;
 
     foreach my $key (@User_Columns) {
-        $self->{$key} ||= $opts{$key} ||= "";
+        $self->{$key} = $opts{$key} || $Defaults{$key};
     }
 }
 
@@ -196,17 +196,6 @@ sub connect {
     $id = dmap_seek(dmap_unpack($dmap), "dmap.loginresponse/dmap.sessionid");
     $self->{ID} = $id;
     $self->_debug("my id is $id\n");
-
-    # get update
-    $dmap = $self->_do_get("update");
-    unless ($dmap) {
-        $self->disconnect;
-        return;
-    }
-    $revision = dmap_seek(dmap_unpack($dmap),
-                          "dmap.updateresponse/dmap.serverrevision");
-    $self->{REVISION} = $revision;
-    $self->_debug("revision $revision\n");
 
     $self->{CONNECTED} = 1;
 
@@ -765,7 +754,7 @@ sub _do_get {
     }
 
     my $content_type = $res->header("Content-Type");
-    if ($req ne 'logout' && $content_type !~ /dmap/) {
+    if ($req !~ m{(?:/items/\d+\.|logout)} && $content_type !~ /dmap/) {
         $self->error("Broken response (content type $content_type) on $url");
         return;
     }
